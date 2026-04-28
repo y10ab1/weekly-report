@@ -1,0 +1,58 @@
+name: Weekly Report
+
+on:
+  # 每週四 UTC 08:00 (台灣時間 16:00) 自動執行
+  # 週報截止是週四 18:00，提前 2 小時填寫
+  schedule:
+    - cron: '0 8 * * 4'
+
+  # 也可以手動觸發
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '僅預覽不填寫'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      days:
+        description: '抓取天數'
+        required: false
+        default: '7'
+
+jobs:
+  fill-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run weekly report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_USERNAME: ${{ vars.GH_USERNAME }}
+          REPORT_EMAIL: ${{ vars.REPORT_EMAIL }}
+          REPORT_DEPT: ${{ vars.REPORT_DEPT }}
+          REPORT_NAME: ${{ vars.REPORT_NAME }}
+          REPORT_URL: ${{ vars.REPORT_URL }}
+          CATEGORIES: ${{ vars.CATEGORIES }}
+          DAYS: ${{ github.event.inputs.days || '7' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          HEADLESS: 'true'
+        run: node index.js
