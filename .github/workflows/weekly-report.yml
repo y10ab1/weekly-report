@@ -47,6 +47,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_USERNAME: ${{ vars.GH_USERNAME }}
+          GITHUB_EMAILS: ${{ vars.GH_EMAILS }}
           REPORT_EMAIL: ${{ vars.REPORT_EMAIL }}
           REPORT_DEPT: ${{ vars.REPORT_DEPT }}
           REPORT_NAME: ${{ vars.REPORT_NAME }}
