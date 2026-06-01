@@ -7,6 +7,7 @@
  * 環境變數:
  *   GITHUB_TOKEN     - GitHub Personal Access Token (必要)
  *   GITHUB_USERNAME  - GitHub 帳號 (必要)
+ *   GITHUB_EMAILS    - 你在各 repo commit 時使用的 email，逗號分隔 (可選，用於抓取別人 repo 的 commit)
  *   REPORT_EMAIL     - 公司 Email (必要)
  *   REPORT_DEPT      - 部門 (必要)
  *   REPORT_NAME      - 姓名 (必要)
@@ -58,6 +59,9 @@ const config = {
   githubToken: requireEnv('GITHUB_TOKEN'),
   geminiApiKey: process.env.GEMINI_API_KEY,
   githubUsername: requireEnv('GITHUB_USERNAME'),
+  githubEmails: process.env.GITHUB_EMAILS
+    ? process.env.GITHUB_EMAILS.split(',').map(e => e.trim())
+    : [],
   reportEmail: requireEnv('REPORT_EMAIL'),
   reportDept: requireEnv('REPORT_DEPT'),
   reportName: requireEnv('REPORT_NAME'),
@@ -88,27 +92,125 @@ async function githubFetch(url) {
 }
 
 async function getCommits(sinceDate) {
+  // === Step 1: 用 Search API 搜尋（能搜到公開 + 自己的 private repo）===
   const query = `author:${config.githubUsername} committer-date:>=${sinceDate}`;
   const url = `https://api.github.com/search/commits?q=${encodeURIComponent(query)}&per_page=100`;
 
   let allCommits = [];
+  let searchRepos = new Set();
   let page = 1;
 
   while (true) {
     const data = await githubFetch(`${url}&page=${page}`);
     const items = data.items || [];
     if (items.length === 0) break;
+    for (const c of items) {
+      searchRepos.add(c.repository.full_name);
+    }
     allCommits = allCommits.concat(items);
     if (items.length < 100) break;
     page++;
   }
 
-  return allCommits
+  const searchResults = allCommits
     .filter(c => !c.commit.message.startsWith('Merge'))
     .map(c => {
       const msg = c.commit.message.split('\n')[0];
       return `[${c.repository.name}] ${msg}`;
     });
+
+  console.log(`  Search API 找到 ${searchResults.length} 個 commits（來自 ${searchRepos.size} 個 repo）`);
+
+  // === Step 2: 用 Events API 找出近期有 push 的所有 repo ===
+  const eventRepos = await getReposFromEvents(sinceDate);
+  const missingRepos = eventRepos.filter(r => !searchRepos.has(r));
+
+  if (missingRepos.length === 0) {
+    console.log(`  所有活躍 repo 皆已涵蓋，無需補充`);
+    return searchResults;
+  }
+
+  console.log(`  發現 ${missingRepos.length} 個 repo 需補充抓取: ${missingRepos.join(', ')}`);
+
+  // === Step 3: 對 Search API 搜不到的 repo，用 Repo Commits API 補抓 ===
+  const extraResults = await getCommitsFromRepos(missingRepos, sinceDate);
+  console.log(`  補充抓到 ${extraResults.length} 個 commits`);
+
+  // === Step 4: 合併去重 ===
+  const combined = [...searchResults, ...extraResults];
+  return [...new Set(combined)];
+}
+
+async function getReposFromEvents(sinceDate) {
+  const sinceTime = new Date(sinceDate).getTime();
+  const repos = new Set();
+
+  // Events API 最多回傳 10 頁 x 100 筆，涵蓋最近 90 天
+  for (let page = 1; page <= 3; page++) {
+    const url = `https://api.github.com/users/${config.githubUsername}/events?per_page=100&page=${page}`;
+    try {
+      const events = await githubFetch(url);
+      if (events.length === 0) break;
+
+      for (const event of events) {
+        const eventTime = new Date(event.created_at).getTime();
+        if (eventTime < sinceTime) continue;
+
+        if (event.type === 'PushEvent') {
+          repos.add(event.repo.name);
+        }
+      }
+    } catch (e) {
+      console.log(`  Events API page ${page} 失敗: ${e.message}`);
+      break;
+    }
+  }
+
+  return [...repos];
+}
+
+async function getCommitsFromRepos(repos, sinceDate) {
+  const results = [];
+  const emails = config.githubEmails;
+  const username = config.githubUsername;
+
+  for (const repoFullName of repos) {
+    // 抓取該 repo 所有 branch
+    let branches = [];
+    try {
+      branches = await githubFetch(`https://api.github.com/repos/${repoFullName}/branches?per_page=100`);
+    } catch (e) {
+      console.log(`  無法取得 ${repoFullName} 的 branches: ${e.message}`);
+      continue;
+    }
+
+    const repoName = repoFullName.split('/').pop();
+    const seen = new Set();
+
+    for (const branch of branches) {
+      // 嘗試用 username 搜
+      const authors = [username, ...emails];
+
+      for (const author of authors) {
+        const url = `https://api.github.com/repos/${repoFullName}/commits?sha=${branch.name}&author=${encodeURIComponent(author)}&since=${sinceDate}T00:00:00Z&per_page=100`;
+        try {
+          const commits = await githubFetch(url);
+          for (const c of commits) {
+            if (seen.has(c.sha)) continue;
+            seen.add(c.sha);
+
+            const msg = c.commit.message.split('\n')[0];
+            if (msg.startsWith('Merge')) continue;
+            results.push(`[${repoName}] ${msg}`);
+          }
+        } catch (e) {
+          // 靜默忽略單一 branch 的錯誤
+        }
+      }
+    }
+  }
+
+  return [...new Set(results)];
 }
 
 async function getPRs(sinceDate) {
@@ -329,14 +431,15 @@ async function main() {
   const sinceDate = lastWeek.toISOString().split('T')[0];
 
   console.log(`使用者: ${config.githubUsername}`);
+  console.log(`關聯 emails: ${config.githubEmails.length > 0 ? config.githubEmails.join(', ') : '(未設定)'}`);
   console.log(`分類: ${config.categories.map(c => c.name).join(', ')}`);
   console.log(`抓取範圍: ${sinceDate} ~ ${today.toISOString().split('T')[0]}`);
   console.log(`模式: ${config.dryRun ? '預覽 (dry-run)' : '填寫'}`);
   console.log('');
 
-  console.log('[1/4] 正在抓取 GitHub commits...');
+  console.log('[1/4] 正在抓取 GitHub commits（Search API + Events API 補充）...');
   const commits = await getCommits(sinceDate);
-  console.log(`  找到 ${commits.length} 個 commits`);
+  console.log(`  總共 ${commits.length} 個 commits`);
 
   console.log('[2/4] 正在抓取 GitHub PRs...');
   const prs = await getPRs(sinceDate);
