@@ -18,9 +18,17 @@
  *   DRY_RUN          - 設為 true 則僅預覽不填寫
  *   HEADLESS         - 設為 false 則顯示瀏覽器 (預設: true)
  *   USE_AI           - 設為 false 則不使用 AI 總結 (預設: true，需要 GEMINI_API_KEY)
+ *
+ *   --- Email 通知 (可選，填完後寄一份週報內容到信箱) ---
+ *   SMTP_USER        - 寄件 Gmail 帳號 (例如 xxx@gmail.com)
+ *   SMTP_PASS        - Gmail 應用程式密碼 (16 碼，非登入密碼)
+ *   MAIL_TO          - 收件信箱 (預設: 同 REPORT_EMAIL)
+ *   MAIL_FROM        - 寄件人顯示 (預設: 同 SMTP_USER)
+ *   SEND_EMAIL       - 設為 false 則不寄信 (預設: true，需設定 SMTP_USER/SMTP_PASS)
  */
 
 import { chromium } from 'playwright';
+import nodemailer from 'nodemailer';
 
 // === Helpers ===
 
@@ -71,6 +79,12 @@ const config = {
   dryRun: process.env.DRY_RUN === 'true',
   headless: process.env.HEADLESS !== 'false',
   useAI: process.env.USE_AI !== 'false',
+  // Email 通知設定
+  smtpUser: process.env.SMTP_USER,
+  smtpPass: process.env.SMTP_PASS,
+  mailTo: process.env.MAIL_TO || process.env.REPORT_EMAIL,
+  mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER,
+  sendEmail: process.env.SEND_EMAIL !== 'false',
 };
 
 // === GitHub API ===
@@ -418,6 +432,70 @@ async function fillForm(categoryContents) {
   }
 }
 
+// === Email 寄送 ===
+
+async function sendReportEmail(categoryContents, dateRange) {
+  if (!config.sendEmail) {
+    console.log('  SEND_EMAIL=false，跳過寄信。');
+    return;
+  }
+
+  if (!config.smtpUser || !config.smtpPass) {
+    console.log('  未設定 SMTP_USER / SMTP_PASS，跳過寄信。');
+    return;
+  }
+
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: config.smtpUser,
+      pass: config.smtpPass,
+    },
+  });
+
+  const subject = `週報 (${dateRange})`;
+
+  // 純文字版本
+  const textParts = [`週報填寫內容 (${dateRange})`, ''];
+  for (const cat of config.categories) {
+    textParts.push(`========== ${cat.name} ==========`);
+    textParts.push(categoryContents[cat.name] || '本週無紀錄');
+    textParts.push('');
+  }
+  const text = textParts.join('\n');
+
+  // HTML 版本
+  const nl2br = (s) => String(s).replace(/\n/g, '<br>');
+  const colors = ['#4285f4', '#34a853', '#ea4335', '#fbbc05', '#9c27b0'];
+  const sections = config.categories
+    .map((cat, i) => {
+      const color = colors[i % colors.length];
+      const content = nl2br(categoryContents[cat.name] || '本週無紀錄');
+      return `
+      <h3 style="border-bottom: 2px solid ${color}; padding-bottom: 4px;">${cat.name}</h3>
+      <div style="margin-bottom: 20px;">${content}</div>`;
+    })
+    .join('');
+
+  const html = `
+    <div style="font-family: -apple-system, 'Segoe UI', 'Microsoft JhengHei', sans-serif; color: #222; line-height: 1.6;">
+      <h2 style="margin: 0 0 4px;">週報</h2>
+      <p style="color: #888; margin: 0 0 16px;">${dateRange}</p>
+      ${sections}
+    </div>
+  `;
+
+  const info = await transporter.sendMail({
+    from: config.mailFrom || config.smtpUser,
+    to: config.mailTo,
+    subject,
+    text,
+    html,
+  });
+
+  console.log(`  已寄送週報到 ${config.mailTo} (messageId: ${info.messageId})`);
+}
+
 // === 主流程 ===
 
 async function main() {
@@ -429,11 +507,13 @@ async function main() {
   const lastWeek = new Date();
   lastWeek.setDate(today.getDate() - config.days);
   const sinceDate = lastWeek.toISOString().split('T')[0];
+  const todayDate = today.toISOString().split('T')[0];
+  const dateRange = `${sinceDate} ~ ${todayDate}`;
 
   console.log(`使用者: ${config.githubUsername}`);
   console.log(`關聯 emails: ${config.githubEmails.length > 0 ? config.githubEmails.join(', ') : '(未設定)'}`);
   console.log(`分類: ${config.categories.map(c => c.name).join(', ')}`);
-  console.log(`抓取範圍: ${sinceDate} ~ ${today.toISOString().split('T')[0]}`);
+  console.log(`抓取範圍: ${dateRange}`);
   console.log(`模式: ${config.dryRun ? '預覽 (dry-run)' : '填寫'}`);
   console.log('');
 
@@ -481,11 +561,16 @@ async function main() {
 
   if (config.dryRun) {
     console.log('[DRY RUN] 以上為預覽內容，不會填入表單。');
+    console.log('[Email] 寄送預覽內容...');
+    await sendReportEmail(categoryContents, dateRange);
     return;
   }
 
-  console.log('[4/4] 正在用 Playwright 填寫表單...');
+  console.log('[4/5] 正在用 Playwright 填寫表單...');
   await fillForm(categoryContents);
+
+  console.log('[5/5] 正在寄送週報 email...');
+  await sendReportEmail(categoryContents, dateRange);
 
   console.log('');
   console.log('============================================');

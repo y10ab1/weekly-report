@@ -9,6 +9,7 @@
     "report:preview": "DRY_RUN=true node index.js"
   },
   "dependencies": {
+    "nodemailer": "^10.0.1",
     "playwright": "^1.52.0"
   }
 }

@@ -56,4 +56,7 @@ jobs:
           DAYS: ${{ github.event.inputs.days || '7' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           HEADLESS: 'true'
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ vars.MAIL_TO || vars.REPORT_EMAIL }}
         run: node index.js
