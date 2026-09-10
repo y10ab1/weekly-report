@@ -4,6 +4,7 @@
   "description": "原創中心週報自動填寫工具 - 從 GitHub 抓取本週活動，自動填入週報系統",
   "type": "module",
   "scripts": {
+    "test": "node --test",
     "report": "node index.js",
     "report:dry-run": "DRY_RUN=true node index.js",
     "report:preview": "DRY_RUN=true node index.js"

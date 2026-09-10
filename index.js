@@ -29,6 +29,7 @@
 
 import { chromium } from 'playwright';
 import nodemailer from 'nodemailer';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // === Helpers ===
 
@@ -377,58 +378,63 @@ async function getAISummary(allActivities) {
 // === Playwright 填表 ===
 
 async function fillForm(categoryContents) {
-  console.log('啟動瀏覽器...');
-  const browser = await chromium.launch({ headless: config.headless });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+  const maxAttempts = 3;
 
-  try {
-    console.log('導航到週報系統...');
-    await page.goto(config.reportUrl, { waitUntil: 'networkidle', timeout: 30000 });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let browser;
+    try {
+      console.log(`填表嘗試 ${attempt}/${maxAttempts}，啟動瀏覽器...`);
+      browser = await chromium.launch({ headless: config.headless });
+      const context = await browser.newContext();
+      const page = await context.newPage();
 
-    const frame1 = page.locator('iframe[title="原創中心週報系統"]').contentFrame();
-    const frame2 = frame1.locator('iframe[title="原創中心週報系統"]').contentFrame();
+      console.log('導航到週報系統...');
+      await page.goto(config.reportUrl, { waitUntil: 'networkidle', timeout: 30000 });
 
-    await frame2.getByRole('textbox', { name: 'xxx@gamania.com' }).waitFor({ state: 'visible', timeout: 15000 });
+      const frame1 = page.locator('iframe[title="原創中心週報系統"]').contentFrame();
+      const frame2 = frame1.locator('iframe[title="原創中心週報系統"]').contentFrame();
 
-    console.log('填寫登入資訊...');
-    await frame2.getByRole('textbox', { name: 'xxx@gamania.com' }).fill(config.reportEmail);
-    await frame2.locator('#login-dept').selectOption([config.reportDept]);
-    await page.waitForTimeout(1000);
-    await frame2.locator('#login-name').selectOption([config.reportName]);
+      await frame2.getByRole('textbox', { name: 'xxx@gamania.com' }).waitFor({ state: 'visible', timeout: 30000 });
 
-    await frame2.getByRole('button', { name: '進入系統' }).click();
-    console.log('進入系統，等待載入...');
-    await page.waitForTimeout(3000);
+      console.log('填寫登入資訊...');
+      await frame2.getByRole('textbox', { name: 'xxx@gamania.com' }).fill(config.reportEmail);
+      await frame2.locator('#login-dept').selectOption([config.reportDept]);
+      await page.waitForTimeout(1000);
+      await frame2.locator('#login-name').selectOption([config.reportName]);
 
-    // 等待第一個分類欄位出現
-    const firstField = config.categories[0].field;
-    await frame2.locator(firstField).waitFor({ state: 'visible', timeout: 15000 });
-    console.log('表單已載入');
+      await frame2.getByRole('button', { name: '進入系統' }).click();
+      console.log('進入系統，等待載入...');
 
-    // 依序填入每個分類欄位
-    for (const cat of config.categories) {
-      const content = categoryContents[cat.name] || '本週無紀錄';
-      console.log(`填寫「${cat.name}」(${cat.field})...`);
-      await frame2.locator(cat.field).fill(content);
-      await page.waitForTimeout(2000);
-    }
+      const firstField = config.categories[0].field;
+      await frame2.locator(firstField).waitFor({ state: 'visible', timeout: 60000 });
+      console.log('表單已載入');
 
-    console.log('等待自動儲存...');
-    await page.waitForTimeout(5000);
+      // 重試時覆寫同一份內容，不重新產生摘要。
+      for (const cat of config.categories) {
+        const content = categoryContents[cat.name] || '本週無紀錄';
+        console.log(`填寫「${cat.name}」(${cat.field})...`);
+        await frame2.locator(cat.field).fill(content);
+        await page.waitForTimeout(2000);
+      }
 
-    const savedIndicator = frame2.locator('text=已儲存').first();
-    const isSaved = await savedIndicator.isVisible().catch(() => false);
-
-    if (isSaved) {
+      console.log('等待自動儲存...');
+      await page.waitForTimeout(5000);
+      await frame2.locator('text=已儲存').first().waitFor({ state: 'visible', timeout: 30000 });
       console.log('儲存成功！');
-    } else {
-      console.log('警告: 未偵測到「已儲存」指示，請手動確認。');
+      return;
+    } catch (err) {
+      console.error(`填表嘗試 ${attempt}/${maxAttempts} 失敗: ${err.message}`);
+      if (attempt === maxAttempts) {
+        throw new Error(`填表連續 ${maxAttempts} 次失敗: ${err.message}`, { cause: err });
+      }
+    } finally {
+      if (browser) {
+        await browser.close().catch(err => console.error(`關閉瀏覽器失敗: ${err.message}`));
+      }
     }
 
-  } finally {
-    await browser.close();
-    console.log('瀏覽器已關閉');
+    console.log('10 秒後重新登入並填寫...');
+    await delay(10000);
   }
 }
 
