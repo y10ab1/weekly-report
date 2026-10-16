@@ -243,93 +243,96 @@ async function getPRs(sinceDate) {
 
 // === 分類 ===
 
-function classify(activities) {
-  const result = {};
-  const matched = new Set();
+/** 從 "[repo] msg" / "[PR:repo] title" 解析出 repo 名稱與內容 */
+function parseActivity(line) {
+  const m = line.match(/^\[(PR:)?([^\]]+)\]\s*(.*)$/);
+  if (!m) return null;
+  return { repo: m[2], text: m[1] ? `PR: ${m[3]}` : m[3] };
+}
 
-  const format = (arr) => {
-    if (arr.length === 0) return '本週無紀錄';
-    const unique = [...new Set(arr)].sort();
-    return unique.map(item => `- ${item}`).join('\n');
-  };
+/** 依 repo 分組，回傳 Map<repo, string[]>，依活動數量由多到少排序 */
+function groupByRepo(activities) {
+  const groups = new Map();
+  for (const line of activities) {
+    const a = parseActivity(line);
+    if (!a) continue;
+    // 同一個 repo 名稱不分大小寫合併
+    const key = [...groups.keys()].find(k => k.toLowerCase() === a.repo.toLowerCase()) || a.repo;
+    if (!groups.has(key)) groups.set(key, []);
+    const list = groups.get(key);
+    if (!list.includes(a.text)) list.push(a.text);
+  }
+  return new Map([...groups.entries()].sort((a, b) => b[1].length - a[1].length));
+}
 
-  // 先處理有具體 repos 的分類（非 wildcard）
+/** 找出 repo 所屬的分類：先比對非 wildcard 分類，沒有則歸入第一個 wildcard 分類 */
+function categoryOfRepo(repo) {
   for (const cat of config.categories) {
     if (cat.repos.includes('*')) continue;
+    const pattern = new RegExp(`^(?:${cat.repos.join('|')})$`, 'i');
+    if (pattern.test(repo)) return cat;
+  }
+  return config.categories.find(cat => cat.repos.includes('*')) || null;
+}
 
-    const pattern = new RegExp(
-      `\\[(?:PR:)?(?:${cat.repos.join('|')})\\]`,
-      'i'
-    );
+/** 沒有 AI 總結時的備用：直接串接 commit 訊息，截斷到約 60 字 */
+function fallbackSummary(items) {
+  const joined = items.join('、');
+  return joined.length > 60 ? joined.slice(0, 60) + '…' : joined;
+}
 
-    const items = [];
-    for (let i = 0; i < activities.length; i++) {
-      if (pattern.test(activities[i])) {
-        items.push(activities[i]);
-        matched.add(i);
-      }
-    }
-    result[cat.name] = format(items);
+/** 組合每個分類欄位的內容，每個 repo 一行: [repo]: 總結 */
+function buildCategoryContents(groups, summaries = {}) {
+  const result = {};
+  for (const cat of config.categories) result[cat.name] = [];
+
+  for (const [repo, items] of groups) {
+    const cat = categoryOfRepo(repo);
+    if (!cat) continue;
+    const summary = (summaries[repo] || '').trim() || fallbackSummary(items);
+    result[cat.name].push(`[${repo}]: ${summary}`);
   }
 
-  // 處理 wildcard 分類（收集剩餘項目）
   for (const cat of config.categories) {
-    if (!cat.repos.includes('*')) continue;
-
-    const items = [];
-    for (let i = 0; i < activities.length; i++) {
-      if (!matched.has(i)) {
-        items.push(activities[i]);
-      }
-    }
-    result[cat.name] = format(items);
+    result[cat.name] = result[cat.name].length > 0 ? result[cat.name].join('\n') : '本週無紀錄';
   }
-
   return result;
 }
 
 // === Gemini AI 總結 ===
 
-function buildAIPrompt(allActivities) {
-  const activitiesText = allActivities.join('\n');
+function buildAIPrompt(groups) {
+  const repoNames = [...groups.keys()];
+  const activitiesText = [...groups.entries()]
+    .map(([repo, items]) => `### ${repo}\n${items.map(i => `- ${i}`).join('\n')}`)
+    .join('\n\n');
+  const jsonExample = '{' + repoNames.map(r => `"${r}": "30-60 字的總結..."`).join(', ') + '}';
 
-  const categoryRules = config.categories
-    .map((cat, i) => {
-      const repoHint = cat.repos.includes('*')
-        ? '不屬於其他分類的所有項目'
-        : `涉及 ${cat.repos.join(', ')} 的項目`;
-      return `${i + 1}. ${cat.name}：${repoHint}`;
-    })
-    .join('\n');
-
-  const jsonKeys = config.categories.map(cat => `"${cat.name}"`).join(', ');
-  const jsonExample = '{' + config.categories.map(cat => `"${cat.name}": "該分類的總結內容..."`).join(', ') + '}';
-
-  return `你是一個專業的助手。請分析以下我本週在 GitHub 所有專案的 commit 與 PR 紀錄，並依照分類規則整理。
-
-**分類規則：**
-${categoryRules}
+  return `你是一個專業的助手。以下是我本週在 GitHub 各個 repo 的 commit 與 PR 紀錄（依 repo 分組）。
+請為**每一個** repo 各寫一段總結。
 
 **格式要求：**
-1. 每類總結出 5-10 個重點，以 dash (-) 條列。
-2. 每句話 10~20 個字左右，保留專業名詞與所屬 Repo (在每項最前方用[REPO_NAME]），不要多餘的問候語。
-3. **必須**嚴格以下列 JSON 格式回覆，不要包含 Markdown 語法 (如 \`\`\`json) 或其他說明文字：
+1. 每個 repo 一段，約 30~60 個中文字，一句或兩句話概括本週在該 repo 完成的主要工作。
+2. 保留專業名詞，不要條列、不要換行、不要在內容中重複 repo 名稱、不要以「本週」開頭，不要多餘的問候語。
+3. 不論該 repo 的 commit 多寡，都必須產出總結，不可省略任何 repo。
+4. **必須**嚴格以下列 JSON 格式回覆，不要包含 Markdown 語法 (如 \`\`\`json) 或其他說明文字：
 ${jsonExample}
 
-JSON key 必須為: ${jsonKeys}
+JSON key 必須完全等於這些 repo 名稱: ${repoNames.map(r => `"${r}"`).join(', ')}
 
 以下是 Commit 與 PR 紀錄：
 ${activitiesText}`;
 }
 
-async function getAISummary(allActivities) {
+async function getAISummary(groups) {
   if (!config.geminiApiKey) {
     console.log('  未設定 GEMINI_API_KEY，跳過 AI 總結，使用規則分類。');
     return null;
   }
+  if (groups.size === 0) return {};
 
-  const prompt = buildAIPrompt(allActivities);
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.geminiApiKey}`;
+  const prompt = buildAIPrompt(groups);
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${config.geminiApiKey}`;
 
   try {
     const res = await fetch(geminiUrl, {
@@ -337,6 +340,7 @@ async function getAISummary(allActivities) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json' },
       }),
     });
 
@@ -359,12 +363,20 @@ async function getAISummary(allActivities) {
       .replace(/```/g, '')
       .trim();
 
-    const parsed = JSON.parse(cleanJson);
+    // 只取第一個完整的 JSON 物件，避免模型在 JSON 後多輸出文字
+    const start = cleanJson.indexOf('{');
+    const end = cleanJson.lastIndexOf('}');
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanJson);
+    } catch {
+      parsed = JSON.parse(cleanJson.slice(start, end + 1));
+    }
 
-    // 驗證回傳的 key 是否與分類名稱一致
-    for (const cat of config.categories) {
-      if (!(cat.name in parsed)) {
-        console.log(`  警告: AI 回傳缺少分類「${cat.name}」，該欄位使用規則分類`);
+    // 驗證每個 repo 都有總結（缺少的會改用 commit 訊息備用）
+    for (const repo of groups.keys()) {
+      if (!parsed[repo]) {
+        console.log(`  警告: AI 回傳缺少 repo「${repo}」，改用 commit 訊息`);
       }
     }
 
@@ -532,31 +544,24 @@ async function main() {
   console.log(`  找到 ${prs.length} 個 PRs`);
 
   const allActivities = [...commits, ...prs];
-  let categoryContents;
+  const groups = groupByRepo(allActivities);
+  console.log(`  共 ${groups.size} 個 repo 有活動: ${[...groups.keys()].join(', ')}`);
 
+  let summaries = {};
   if (config.useAI && config.geminiApiKey) {
-    console.log('[3/4] 正在用 Gemini AI 分類與總結...');
-    const aiResult = await getAISummary(allActivities);
-
+    console.log('[3/4] 正在用 Gemini AI 為每個 repo 產生總結...');
+    const aiResult = await getAISummary(groups);
     if (aiResult) {
-      categoryContents = aiResult;
+      summaries = aiResult;
       console.log('  AI 總結完成');
     } else {
-      console.log('  AI 總結失敗，回退到規則分類');
-      categoryContents = classify(allActivities);
+      console.log('  AI 總結失敗，改用 commit 訊息');
     }
   } else {
-    console.log('[3/4] 正在用規則分類...');
-    categoryContents = classify(allActivities);
+    console.log('[3/4] 未使用 AI，直接使用 commit 訊息...');
   }
 
-  // 如果 AI 回傳缺少某些分類，用規則分類補上
-  const ruleClassified = classify(allActivities);
-  for (const cat of config.categories) {
-    if (!categoryContents[cat.name]) {
-      categoryContents[cat.name] = ruleClassified[cat.name];
-    }
-  }
+  const categoryContents = buildCategoryContents(groups, summaries);
 
   console.log('');
   for (const cat of config.categories) {
