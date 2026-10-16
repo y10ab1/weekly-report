@@ -275,13 +275,47 @@ function categoryOfRepo(repo) {
   return config.categories.find(cat => cat.repos.includes('*')) || null;
 }
 
-/** 沒有 AI 總結時的備用：直接串接 commit 訊息，截斷到約 60 字 */
+/** 沒有 AI 總結時的備用：直接用 commit 訊息當總結與細節 */
 function fallbackSummary(items) {
   const joined = items.join('、');
   return joined.length > 60 ? joined.slice(0, 60) + '…' : joined;
 }
 
-/** 組合每個分類欄位的內容，每個 repo 一行: [repo]: 總結 */
+function fallbackDetails(items) {
+  const details = [];
+  let total = 0;
+  for (const item of items) {
+    if (total >= 200 || details.length >= 4) break;
+    details.push(item);
+    total += item.length;
+  }
+  return details;
+}
+
+/** 將 AI 回傳的單一 repo 結果正規化為 { summary, details[] } */
+function normalizeRepoSummary(value) {
+  if (!value) return { summary: '', details: [] };
+  if (typeof value === 'string') return { summary: value.trim(), details: [] };
+  const details = Array.isArray(value.details)
+    ? value.details
+    : String(value.details || '').split('\n');
+  return {
+    summary: String(value.summary || '').trim(),
+    details: details.map(d => String(d).replace(/^[-•\s]+/, '').trim()).filter(Boolean),
+  };
+}
+
+/**
+ * 組合每個分類欄位的內容（週報系統是純文字 textarea，無法粗體）：
+ *
+ * 【repo】
+ * 總結：...
+ * 細節：
+ * - ...
+ * - ...
+ *
+ * 每個 repo 之間空一行。
+ */
 function buildCategoryContents(groups, summaries = {}) {
   const result = {};
   for (const cat of config.categories) result[cat.name] = [];
@@ -289,12 +323,18 @@ function buildCategoryContents(groups, summaries = {}) {
   for (const [repo, items] of groups) {
     const cat = categoryOfRepo(repo);
     if (!cat) continue;
-    const summary = (summaries[repo] || '').trim() || fallbackSummary(items);
-    result[cat.name].push(`[${repo}]: ${summary}`);
+    const ai = normalizeRepoSummary(summaries[repo]);
+    const summary = ai.summary || fallbackSummary(items);
+    const details = ai.details.length > 0 ? ai.details : fallbackDetails(items);
+    const block = [`【${repo}】`, `總結：${summary}`];
+    if (details.length > 0) {
+      block.push('細節：', ...details.map(d => `- ${d}`));
+    }
+    result[cat.name].push(block.join('\n'));
   }
 
   for (const cat of config.categories) {
-    result[cat.name] = result[cat.name].length > 0 ? result[cat.name].join('\n') : '本週無紀錄';
+    result[cat.name] = result[cat.name].length > 0 ? result[cat.name].join('\n\n') : '本週無紀錄';
   }
   return result;
 }
@@ -306,16 +346,20 @@ function buildAIPrompt(groups) {
   const activitiesText = [...groups.entries()]
     .map(([repo, items]) => `### ${repo}\n${items.map(i => `- ${i}`).join('\n')}`)
     .join('\n\n');
-  const jsonExample = '{' + repoNames.map(r => `"${r}": "30-60 字的總結..."`).join(', ') + '}';
+  const jsonExample = '{' + repoNames
+    .map(r => `"${r}": {"summary": "30-60 字的總結...", "details": ["細節一...", "細節二...", "細節三..."]}`)
+    .join(', ') + '}';
 
   return `你是一個專業的助手。以下是我本週在 GitHub 各個 repo 的 commit 與 PR 紀錄（依 repo 分組）。
-請為**每一個** repo 各寫一段總結。
+請為**每一個** repo 各寫一段總結與細節。
 
 **格式要求：**
-1. 每個 repo 一段，約 30~60 個中文字，一句或兩句話概括本週在該 repo 完成的主要工作。
-2. 保留專業名詞，不要條列、不要換行、不要在內容中重複 repo 名稱、不要以「本週」開頭，不要多餘的問候語。
-3. 不論該 repo 的 commit 多寡，都必須產出總結，不可省略任何 repo。
-4. **必須**嚴格以下列 JSON 格式回覆，不要包含 Markdown 語法 (如 \`\`\`json) 或其他說明文字：
+1. summary：約 30~60 個中文字，一句或兩句話概括本週在該 repo 完成的主要工作。
+2. details：2~4 個重點的陣列，合計約 100~200 個中文字，補充 summary 沒提到的具體內容（功能、技術做法、修正的問題、成果數據等），每點一句話，不要和 summary 重複。
+   若該 repo 紀錄很少，details 可以只有 1~2 點，但不可捏造紀錄中沒有的內容。
+3. 保留專業名詞，不要在內容中重複 repo 名稱、不要以「本週」開頭、不要使用 Markdown 粗體或符號，不要多餘的問候語。
+4. 不論該 repo 的 commit 多寡，都必須產出，不可省略任何 repo。
+5. **必須**嚴格以下列 JSON 格式回覆，不要包含 Markdown 語法 (如 \`\`\`json) 或其他說明文字：
 ${jsonExample}
 
 JSON key 必須完全等於這些 repo 名稱: ${repoNames.map(r => `"${r}"`).join(', ')}
@@ -375,7 +419,7 @@ async function getAISummary(groups) {
 
     // 驗證每個 repo 都有總結（缺少的會改用 commit 訊息備用）
     for (const repo of groups.keys()) {
-      if (!parsed[repo]) {
+      if (!normalizeRepoSummary(parsed[repo]).summary) {
         console.log(`  警告: AI 回傳缺少 repo「${repo}」，改用 commit 訊息`);
       }
     }
@@ -483,12 +527,21 @@ async function sendReportEmail(categoryContents, dateRange) {
   const text = textParts.join('\n');
 
   // HTML 版本
-  const nl2br = (s) => String(s).replace(/\n/g, '<br>');
+  const escapeHtml = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Email 是 HTML，可以把【repo】與「總結：/細節：」加粗
+  const renderContent = (s) => escapeHtml(s)
+    .split('\n')
+    .map(line => {
+      if (/^【.+】$/.test(line)) return `<b style="font-size: 15px;">${line}</b>`;
+      return line.replace(/^(總結：|細節：)/, '<b>$1</b>');
+    })
+    .join('<br>');
   const colors = ['#4285f4', '#34a853', '#ea4335', '#fbbc05', '#9c27b0'];
   const sections = config.categories
     .map((cat, i) => {
       const color = colors[i % colors.length];
-      const content = nl2br(categoryContents[cat.name] || '本週無紀錄');
+      const content = renderContent(categoryContents[cat.name] || '本週無紀錄');
       return `
       <h3 style="border-bottom: 2px solid ${color}; padding-bottom: 4px;">${cat.name}</h3>
       <div style="margin-bottom: 20px;">${content}</div>`;
