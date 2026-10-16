@@ -310,7 +310,7 @@ function normalizeRepoSummary(value) {
  *
  * 【repo】
  * 總結：...
- * 細節：
+ * 補充：
  * - ...
  * - ...
  *
@@ -328,7 +328,7 @@ function buildCategoryContents(groups, summaries = {}) {
     const details = ai.details.length > 0 ? ai.details : fallbackDetails(items);
     const block = [`【${repo}】`, `總結：${summary}`];
     if (details.length > 0) {
-      block.push('細節：', ...details.map(d => `- ${d}`));
+      block.push('補充：', ...details.map(d => `- ${d}`));
     }
     result[cat.name].push(block.join('\n'));
   }
@@ -529,12 +529,12 @@ async function sendReportEmail(categoryContents, dateRange) {
   // HTML 版本
   const escapeHtml = (s) => String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  // Email 是 HTML，可以把【repo】與「總結：/細節：」加粗
+  // Email 是 HTML，可以把【repo】與「總結：/補充：」加粗
   const renderContent = (s) => escapeHtml(s)
     .split('\n')
     .map(line => {
       if (/^【.+】$/.test(line)) return `<b style="font-size: 15px;">${line}</b>`;
-      return line.replace(/^(總結：|細節：)/, '<b>$1</b>');
+      return line.replace(/^(總結：|補充：)/, '<b>$1</b>');
     })
     .join('<br>');
   const colors = ['#4285f4', '#34a853', '#ea4335', '#fbbc05', '#9c27b0'];
