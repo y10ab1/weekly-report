@@ -23,6 +23,7 @@
  *   SMTP_USER        - 寄件 Gmail 帳號 (例如 xxx@gmail.com)
  *   SMTP_PASS        - Gmail 應用程式密碼 (16 碼，非登入密碼)
  *   MAIL_TO          - 收件信箱 (預設: 同 REPORT_EMAIL)
+ *   MAIL_CC          - 副本收件人，逗號分隔 (可選)
  *   MAIL_FROM        - 寄件人顯示 (預設: 同 SMTP_USER)
  *   SEND_EMAIL       - 設為 false 則不寄信 (預設: true，需設定 SMTP_USER/SMTP_PASS)
  */
@@ -84,6 +85,9 @@ const config = {
   smtpUser: process.env.SMTP_USER,
   smtpPass: process.env.SMTP_PASS,
   mailTo: process.env.MAIL_TO || process.env.REPORT_EMAIL,
+  mailCc: process.env.MAIL_CC
+    ? process.env.MAIL_CC.split(',').map(e => e.trim()).filter(Boolean)
+    : [],
   mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER,
   sendEmail: process.env.SEND_EMAIL !== 'false',
 };
@@ -559,12 +563,13 @@ async function sendReportEmail(categoryContents, dateRange) {
   const info = await transporter.sendMail({
     from: config.mailFrom || config.smtpUser,
     to: config.mailTo,
+    ...(config.mailCc.length > 0 && { cc: config.mailCc }),
     subject,
     text,
     html,
   });
 
-  console.log(`  已寄送週報到 ${config.mailTo} (messageId: ${info.messageId})`);
+  console.log(`  已寄送週報到 ${config.mailTo}${config.mailCc.length > 0 ? `，CC ${config.mailCc.join(', ')}` : ''} (messageId: ${info.messageId})`);
 }
 
 // === 主流程 ===

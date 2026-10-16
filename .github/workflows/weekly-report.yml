@@ -59,4 +59,5 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ vars.MAIL_TO || vars.REPORT_EMAIL }}
+          MAIL_CC: ${{ vars.MAIL_CC }}
         run: node index.js
