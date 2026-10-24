@@ -53,6 +53,7 @@ jobs:
           REPORT_NAME: ${{ vars.REPORT_NAME }}
           REPORT_URL: ${{ vars.REPORT_URL }}
           CATEGORIES: ${{ vars.CATEGORIES }}
+          EXCLUDE_REPOS: ${{ vars.EXCLUDE_REPOS }}
           DAYS: ${{ github.event.inputs.days || '7' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           HEADLESS: 'true'

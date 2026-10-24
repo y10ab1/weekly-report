@@ -14,6 +14,7 @@
  *   REPORT_URL       - 週報系統網址 (必要)
  *   CATEGORIES       - 分類設定 JSON (必要，格式見 README.md)
  *   GEMINI_API_KEY   - Gemini API Key (可選，用於 AI 總結)
+ *   EXCLUDE_REPOS    - 不寫進週報的 repo 關鍵字，逗號分隔，比對 repo 名稱 (不分大小寫，部分符合即排除)
  *   DAYS             - 抓取天數 (預設: 7)
  *   DRY_RUN          - 設為 true 則僅預覽不填寫
  *   HEADLESS         - 設為 false 則顯示瀏覽器 (預設: true)
@@ -77,6 +78,9 @@ const config = {
   reportName: requireEnv('REPORT_NAME'),
   reportUrl: requireEnv('REPORT_URL'),
   categories: parseCategories(requireEnv('CATEGORIES')),
+  excludeRepos: process.env.EXCLUDE_REPOS
+    ? process.env.EXCLUDE_REPOS.split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+    : [],
   days: parseInt(process.env.DAYS || '7', 10),
   dryRun: process.env.DRY_RUN === 'true',
   headless: process.env.HEADLESS !== 'false',
@@ -267,6 +271,12 @@ function groupByRepo(activities) {
     if (!list.includes(a.text)) list.push(a.text);
   }
   return new Map([...groups.entries()].sort((a, b) => b[1].length - a[1].length));
+}
+
+/** 個人工作（論文、個人網站等）不寫進週報 */
+function isExcludedRepo(repo) {
+  const name = repo.toLowerCase();
+  return config.excludeRepos.some(keyword => name.includes(keyword));
 }
 
 /** 找出 repo 所屬的分類：先比對非 wildcard 分類，沒有則歸入第一個 wildcard 分類 */
@@ -603,8 +613,13 @@ async function main() {
   console.log(`  找到 ${prs.length} 個 PRs`);
 
   const allActivities = [...commits, ...prs];
-  const groups = groupByRepo(allActivities);
+  const allGroups = groupByRepo(allActivities);
+  const excluded = [...allGroups.keys()].filter(isExcludedRepo);
+  const groups = new Map([...allGroups].filter(([repo]) => !isExcludedRepo(repo)));
   console.log(`  共 ${groups.size} 個 repo 有活動: ${[...groups.keys()].join(', ')}`);
+  if (excluded.length > 0) {
+    console.log(`  排除個人工作 ${excluded.length} 個 repo（EXCLUDE_REPOS）: ${excluded.join(', ')}`);
+  }
 
   let summaries = {};
   if (config.useAI && config.geminiApiKey) {
